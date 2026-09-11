@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🍍 PINEAPPLE ARCADE 🍍</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="cabinet">
+  <div class="cabinet-top">
+    <div class="marquee">🍍 PINEAPPLE ARCADE 🍍</div>
+  </div>
+
+  <div class="screen-frame">
+    <div class="screen">
+      <canvas id="game" width="160" height="240"></canvas>
+
+      <!-- CRT overlay effects -->
+      <div class="scanlines"></div>
+      <div class="vignette"></div>
+      <div class="flicker"></div>
+
+      <!-- HUD -->
+      <div id="hud" class="hud hidden">
+        <div class="hud-row">
+          <span>SCORE: <b id="scoreVal">0</b></span>
+          <span>💰 <b id="moneyVal">0</b></span>
+        </div>
+        <div class="hud-row">
+          <span>WAVE: <b id="waveVal">1</b></span>
+          <span id="livesWrap">❤️ <b id="livesVal">10</b></span>
+        </div>
+        <div id="bossBarWrap" class="boss-bar-wrap hidden">
+          <div class="boss-name">👑 БОСС АНАНАС</div>
+          <div class="boss-bar-bg"><div id="bossBarFill" class="boss-bar-fill"></div></div>
+        </div>
+        <div id="powerupStatus" class="powerup-status"></div>
+        <div id="nextBossTimer" class="next-boss-timer hidden"></div>
+      </div>
+
+      <!-- Start screen -->
+      <div id="startScreen" class="overlay">
+        <h1 class="pixel-title">🍍 PINEAPPLE<br>ARCADE 🍍</h1>
+        <p class="pixel-text small">Лови ананасы в очках!<br>Стреляй по боссу!<br>Прокачивай скины!</p>
+        <button id="playBtn" class="arcade-btn">▶ ИГРАТЬ</button>
+        <button id="shopBtnMenu" class="arcade-btn secondary">🛒 МАГАЗИН</button>
+        <p class="pixel-text tiny">← → или мышь — двигать корзину<br>ПРОБЕЛ / клик — выстрел</p>
+      </div>
+
+      <!-- Game over screen -->
+      <div id="gameOverScreen" class="overlay hidden">
+        <h1 class="pixel-title small-title">💀 GAME OVER 💀</h1>
+        <p class="pixel-text">Счёт: <b id="finalScore">0</b></p>
+        <p class="pixel-text">Заработано: 💰<b id="finalMoney">0</b></p>
+        <p class="pixel-text tiny">Рекорд: <b id="finalHigh">0</b></p>
+        <button id="retryBtn" class="arcade-btn">↻ ЗАНОВО</button>
+        <button id="shopBtnGameOver" class="arcade-btn secondary">🛒 МАГАЗИН</button>
+      </div>
+
+      <!-- Shop screen -->
+      <div id="shopScreen" class="overlay hidden">
+        <h1 class="pixel-title small-title">🛒 МАГАЗИН</h1>
+        <div class="shop-money">💰 <b id="shopMoney">0</b></div>
+
+        <div class="shop-tabs">
+          <button class="tab-btn active" data-tab="cases">Кейсы</button>
+          <button class="tab-btn" data-tab="inventory">Инвентарь</button>
+        </div>
+
+        <div id="casesTab" class="shop-tab-content">
+          <div class="case-grid" id="caseGrid"></div>
+        </div>
+
+        <div id="inventoryTab" class="shop-tab-content hidden">
+          <div class="inv-grid" id="invGrid"></div>
+        </div>
+
+        <button id="closeShopBtn" class="arcade-btn">✕ ЗАКРЫТЬ</button>
+      </div>
+
+      <!-- Case opening animation overlay -->
+      <div id="caseOpenScreen" class="overlay hidden">
+        <div id="caseReveal" class="case-reveal"></div>
+        <button id="caseOpenCloseBtn" class="arcade-btn hidden">OK</button>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="cabinet-controls">
+    <button id="muteBtn" class="ctrl-btn">🔊</button>
+    <button id="pauseBtn" class="ctrl-btn hidden">⏸</button>
+    <button id="shopBtnIngame" class="ctrl-btn hidden">🛒</button>
+  </div>
+</div>
+
+<script src="game.js"></script>
+</body>
+</html>
