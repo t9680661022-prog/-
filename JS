@@ -1,0 +1,1180 @@
+/* =========================================================
+   🍍 PINEAPPLE ARCADE — game.js
+   Pixel-art canvas game: catch pineapples, fight the boss,
+   collect skins in the shop. Pure vanilla JS + Canvas2D.
+   ========================================================= */
+
+(() => {
+'use strict';
+
+/* ---------------------------------------------------------
+   CONSTANTS
+--------------------------------------------------------- */
+const W = 160, H = 240;               // internal pixel resolution
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const GROUND_Y = H - 14;
+
+/* ---------------------------------------------------------
+   AUDIO (synth, no external files)
+--------------------------------------------------------- */
+const Audio_ = (() => {
+  let actx = null;
+  let muted = false;
+  let musicTimer = null;
+  let musicStep = 0;
+
+  function ctxReady() {
+    if (!actx) {
+      try { actx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { actx = null; }
+    }
+    if (actx && actx.state === 'suspended') actx.resume();
+    return actx;
+  }
+
+  function tone(freq, dur, type = 'square', vol = 0.15, delay = 0) {
+    const ac = ctxReady();
+    if (!ac || muted) return;
+    const t0 = ac.currentTime + delay;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, t0);
+    gain.gain.setValueAtTime(vol, t0);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  }
+
+  function sweep(f1, f2, dur, type = 'sawtooth', vol = 0.15) {
+    const ac = ctxReady();
+    if (!ac || muted) return;
+    const t0 = ac.currentTime;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f1, t0);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(f2, 1), t0 + dur);
+    gain.gain.setValueAtTime(vol, t0);
+    gain.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(t0);
+    osc.stop(t0 + dur + 0.02);
+  }
+
+  function noise(dur = 0.3, vol = 0.2) {
+    const ac = ctxReady();
+    if (!ac || muted) return;
+    const bufSize = ac.sampleRate * dur;
+    const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / bufSize);
+    }
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    const filt = ac.createBiquadFilter();
+    filt.type = 'lowpass';
+    filt.frequency.value = 1800;
+    const gain = ac.createGain();
+    gain.gain.setValueAtTime(vol, ac.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dur);
+    src.connect(filt).connect(gain).connect(ac.destination);
+    src.start();
+  }
+
+  const sfx = {
+    catch: () => tone(660, 0.09, 'square', 0.12),
+    eliteCatch: () => { tone(760, 0.07, 'square', 0.12); tone(980, 0.09, 'square', 0.1, 0.05); },
+    miss: () => tone(140, 0.25, 'sawtooth', 0.15),
+    shot: () => tone(320, 0.06, 'square', 0.06),
+    bigShot: () => { tone(180, 0.12, 'sawtooth', 0.14); noise(0.1, 0.08); },
+    explosion: () => { noise(0.35, 0.25); sweep(300, 40, 0.35, 'sawtooth', 0.15); },
+    powerup: () => { tone(500, 0.08, 'triangle', 0.14); tone(800, 0.1, 'triangle', 0.12, 0.08); },
+    shield: () => tone(900, 0.15, 'sine', 0.1),
+    bossHit: () => tone(220, 0.06, 'square', 0.1),
+    bossRoar: () => { sweep(180, 60, 0.6, 'sawtooth', 0.22); noise(0.5, 0.15); },
+    bossAppear: () => { sweep(80, 300, 0.8, 'square', 0.2); },
+    bossDefeat: () => { sweep(120, 700, 1.0, 'sawtooth', 0.22); noise(0.6, 0.2); },
+    caseOpen: () => { tone(400, 0.08, 'square', 0.12); tone(600, 0.08, 'square', 0.1, 0.1); tone(900, 0.15, 'square', 0.12, 0.2); },
+    click: () => tone(500, 0.04, 'square', 0.08),
+    gameOver: () => sweep(400, 60, 1.0, 'sawtooth', 0.18),
+  };
+
+  const melody = [392, 440, 494, 440, 392, 330, 392, 494, 523, 494, 440, 392, 330, 294, 330, 392];
+  function musicTick() {
+    if (muted) { musicStep++; return; }
+    const f = melody[musicStep % melody.length];
+    tone(f / 2, 0.18, 'triangle', 0.045);
+    if (musicStep % 4 === 0) tone(f / 4, 0.3, 'square', 0.03);
+    musicStep++;
+  }
+  function startMusic() {
+    if (musicTimer) return;
+    ctxReady();
+    musicTimer = setInterval(musicTick, 220);
+  }
+  function stopMusic() {
+    if (musicTimer) { clearInterval(musicTimer); musicTimer = null; }
+  }
+
+  function setMuted(m) { muted = m; }
+  function isMuted() { return muted; }
+
+  return { sfx, startMusic, stopMusic, setMuted, isMuted, ctxReady };
+})();
+
+/* ---------------------------------------------------------
+   SAVE / STORAGE
+--------------------------------------------------------- */
+const DEFAULT_SAVE = () => ({
+  money: 0,
+  highScore: 0,
+  inventory: ['default'],
+  equipped: 'default',
+});
+let save = DEFAULT_SAVE();
+
+async function loadSave() {
+  try {
+    const res = await window.storage.get('pineapple_save', false);
+    if (res && res.value) {
+      const parsed = JSON.parse(res.value);
+      save = Object.assign(DEFAULT_SAVE(), parsed);
+      if (!save.inventory.includes('default')) save.inventory.unshift('default');
+    }
+  } catch (e) { /* first run — keep defaults */ }
+}
+
+async function persistSave() {
+  try { await window.storage.set('pineapple_save', JSON.stringify(save), false); }
+  catch (e) { /* best effort */ }
+}
+
+/* ---------------------------------------------------------
+   SKINS & CASES
+--------------------------------------------------------- */
+const SKINS = {
+  default:   { name: 'Плетёная',     rarity: 'common',    colors: ['#8a5a2a', '#5c3a1a', '#c9924a'] },
+  straw:     { name: 'Соломенная',   rarity: 'common',    colors: ['#c9a227', '#8a6d14', '#e8cf6a'] },
+  clay:      { name: 'Глиняная',     rarity: 'common',    colors: ['#b5654a', '#7a3a26', '#d98d6e'] },
+  ice:       { name: 'Ледяная',      rarity: 'rare',       colors: ['#2a9dd8', '#154a8a', '#8fe0ff'] },
+  toxic:     { name: 'Токсик',       rarity: 'rare',       colors: ['#2ad86a', '#158a3a', '#a8ffbf'] },
+  neon:      { name: 'Неоновая',     rarity: 'rare',       colors: ['#ff33cc', '#8a1a70', '#ff9aee'] },
+  arcane:    { name: 'Тёмная магия', rarity: 'epic',       colors: ['#9b30d6', '#4a1266', '#d68fff'] },
+  inferno:   { name: 'Пламя',        rarity: 'epic',       colors: ['#ff5a1f', '#a8280a', '#ffcf6a'] },
+  void:      { name: 'Бездна',       rarity: 'epic',       colors: ['#241a44', '#0a0618', '#5a3fae'] },
+  golden:    { name: 'Золотая',      rarity: 'legendary',  colors: ['#ffd700', '#b8860b', '#fff2a8'] },
+  cosmic:    { name: 'Космос',       rarity: 'legendary',  colors: ['#4a2fbf', '#1a0f4a', '#ffe066'] },
+  rainbow:   { name: 'Радужная',     rarity: 'rainbow',    colors: 'rainbow' },
+};
+const RARITY_ORDER = ['common', 'rare', 'epic', 'legendary', 'rainbow'];
+const RARITY_LABEL = { common: 'Обычная', rare: 'Редкая', epic: 'Эпическая', legendary: 'Легендарная', rainbow: 'Радужная' };
+const RARITY_ICON = { common: '📦', rare: '🎁', epic: '💎', legendary: '👑', rainbow: '🌈' };
+
+const CASES = [
+  { id: 'common', name: 'Обычный кейс', icon: '📦', cost: 60,
+    weights: { common: 70, rare: 25, epic: 5 } },
+  { id: 'rare', name: 'Редкий кейс', icon: '🎁', cost: 180,
+    weights: { common: 30, rare: 45, epic: 20, legendary: 5 } },
+  { id: 'epic', name: 'Эпический кейс', icon: '💎', cost: 450,
+    weights: { rare: 30, epic: 45, legendary: 20, rainbow: 5 } },
+];
+
+function skinsOfRarity(r) { return Object.keys(SKINS).filter(k => SKINS[k].rarity === r); }
+
+function rollCase(caseDef) {
+  const entries = Object.entries(caseDef.weights);
+  const total = entries.reduce((s, [, w]) => s + w, 0);
+  let roll = Math.random() * total;
+  let rarity = entries[0][0];
+  for (const [r, w] of entries) {
+    if (roll < w) { rarity = r; break; }
+    roll -= w;
+  }
+  const pool = skinsOfRarity(rarity);
+  const skinId = pool[Math.floor(Math.random() * pool.length)];
+  return skinId;
+}
+
+/* ---------------------------------------------------------
+   PIXEL SPRITES
+--------------------------------------------------------- */
+// 9 wide x 13 tall pineapple grid
+const PINEAPPLE_GRID = [
+  '.L.LL.L..',
+  '.LLLLLLL.',
+  '..L.L.L..',
+  'OOOOOOOO.',
+  'OYyYyYyO.',
+  'OyYyYyYO.',
+  'OKKKKKKO.',
+  'OKWKKWKO.',
+  'OYyYyYyO.',
+  'OyYyYyYO.',
+  'OYyYyYyO.',
+  'OOOOOOOO.',
+  '..OOOO...',
+];
+
+function palettePineapple(elite) {
+  return elite
+    ? { L: '#3a1a66', l: '#6a2fae', O: '#3a0a4a', Y: '#c26bff', y: '#e6b3ff', K: '#160016', W: '#ffffff' }
+    : { L: '#2d6a1f', l: '#4c9a2a', O: '#7a4a12', Y: '#f7c948', y: '#ffe27a', K: '#111111', W: '#ffffff' };
+}
+
+function drawGridSprite(grid, palette, x, y, px, opts = {}) {
+  const rows = grid.length;
+  const cols = grid[0].length;
+  const totalW = cols * px, totalH = rows * px;
+  const ox = x - totalW / 2, oy = y - totalH / 2;
+  for (let r = 0; r < rows; r++) {
+    const row = grid[r];
+    for (let c = 0; c < cols; c++) {
+      const ch = row[c];
+      if (ch === '.') continue;
+      let color = palette[ch];
+      if (!color) continue;
+      if (opts.tint) color = opts.tint;
+      ctx.fillStyle = color;
+      ctx.fillRect(Math.round(ox + c * px), Math.round(oy + r * px), px, px);
+    }
+  }
+  return { w: totalW, h: totalH };
+}
+
+function drawPineapple(x, y, scale, elite, hitFlash) {
+  const px = scale;
+  const pal = palettePineapple(elite);
+  drawGridSprite(PINEAPPLE_GRID, pal, x, y, px, hitFlash ? { tint: '#ffffff' } : {});
+  if (elite) {
+    ctx.save();
+    ctx.globalAlpha = 0.35 + 0.25 * Math.sin(performance.now() / 120);
+    ctx.fillStyle = '#e6b3ff';
+    ctx.beginPath();
+    ctx.arc(x, y, px * 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawBoss(boss) {
+  const px = boss.w / 9;
+  const pal = {
+    L: boss.phase >= 3 ? '#661111' : '#2d6a1f',
+    l: boss.phase >= 3 ? '#992222' : '#4c9a2a',
+    O: '#5a2a08', Y: boss.hitFlash > 0 ? '#ffffff' : '#f7c948',
+    y: boss.hitFlash > 0 ? '#ffffff' : '#ffe27a',
+    K: '#111111', W: boss.phase >= 2 ? '#ff4444' : '#ffffff',
+  };
+  drawGridSprite(PINEAPPLE_GRID, pal, boss.x, boss.y, px);
+  // angry eyebrows in later phases
+  if (boss.phase >= 2) {
+    ctx.fillStyle = '#ff2222';
+    ctx.fillRect(boss.x - px * 3.2, boss.y - px * 2.6, px * 2.2, px * 0.7);
+    ctx.fillRect(boss.x + px * 1.0, boss.y - px * 2.6, px * 2.2, px * 0.7);
+  }
+}
+
+function drawBasket(x, y, w, h, skinId, t) {
+  const skin = SKINS[skinId] || SKINS.default;
+  let [c1, c2, c3] = skin.colors === 'rainbow'
+    ? rainbowColors(t)
+    : skin.colors;
+  const px = w / 8;
+  // rim
+  ctx.fillStyle = c1;
+  ctx.fillRect(x - w / 2, y - h / 2, w, px * 1.4);
+  // body
+  ctx.fillStyle = c2;
+  ctx.fillRect(x - w / 2 + px * 0.6, y - h / 2 + px * 1.4, w - px * 1.2, h - px * 1.6);
+  // weave lines
+  ctx.fillStyle = c3;
+  for (let i = 0; i < 3; i++) {
+    ctx.fillRect(x - w / 2 + px * 0.6, y - h / 2 + px * (2.2 + i * 1.5), w - px * 1.2, px * 0.5);
+  }
+  // shine highlight
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.fillRect(x - w / 2 + px * 0.8, y - h / 2 + px * 0.2, px * 1.5, px * 0.6);
+}
+
+function rainbowColors(t) {
+  const h1 = (t * 60) % 360, h2 = (h1 + 40) % 360, h3 = (h1 + 80) % 360;
+  return [`hsl(${h1},90%,55%)`, `hsl(${h2},90%,35%)`, `hsl(${h3},95%,75%)`];
+}
+
+/* ---------------------------------------------------------
+   GAME STATE
+--------------------------------------------------------- */
+const G = {
+  state: 'menu', // menu | playing | paused | shop | gameover
+  prevState: 'menu',
+  score: 0,
+  money: 0,
+  lives: 10,
+  wave: 1,
+  waveTimer: 0,
+  spawnTimer: 0,
+  powerupTimer: 0,
+  t: 0,
+  shakeMag: 0,
+  shakeTime: 0,
+  flashAlpha: 0,
+  bossActive: false,
+  bossDefeatCount: 0,
+  nextBossIn: 60,
+  boss: null,
+  pineapples: [],
+  powerups: [],
+  projectiles: [],
+  bossProjectiles: [],
+  particles: [],
+  player: {
+    x: W / 2, y: GROUND_Y, w: 34, h: 14,
+    speed: 130, shootCd: 0,
+    shielded: false, shieldTime: 0,
+    bazooka: false, bazookaTime: 0,
+  },
+};
+
+function resetRun() {
+  G.score = 0;
+  G.money = 0;
+  G.lives = 10;
+  G.wave = 1;
+  G.waveTimer = 0;
+  G.spawnTimer = 0.6;
+  G.powerupTimer = 6;
+  G.t = 0;
+  G.bossActive = false;
+  G.bossDefeatCount = 0;
+  G.nextBossIn = 60;
+  G.boss = null;
+  G.pineapples.length = 0;
+  G.powerups.length = 0;
+  G.projectiles.length = 0;
+  G.bossProjectiles.length = 0;
+  G.particles.length = 0;
+  G.player.x = W / 2;
+  G.player.shootCd = 0;
+  G.player.shielded = false;
+  G.player.shieldTime = 0;
+  G.player.bazooka = false;
+  G.player.bazookaTime = 0;
+  spawnBoss(); // boss appears immediately at launch
+}
+
+/* ---------------------------------------------------------
+   PARTICLES / FX
+--------------------------------------------------------- */
+function spawnParticles(x, y, color, count, spread = 60) {
+  for (let i = 0; i < count; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 20 + Math.random() * spread;
+    G.particles.push({
+      x, y,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd,
+      life: 0.3 + Math.random() * 0.35,
+      maxLife: 0.65,
+      color,
+      size: 1 + Math.random() * 2.2,
+    });
+  }
+}
+
+function shake(mag, time) {
+  G.shakeMag = Math.max(G.shakeMag, mag);
+  G.shakeTime = Math.max(G.shakeTime, time);
+}
+
+function flash(a = 0.6) {
+  G.flashAlpha = Math.max(G.flashAlpha, a);
+}
+
+/* ---------------------------------------------------------
+   SPAWNERS
+--------------------------------------------------------- */
+function spawnPineapple() {
+  const elite = Math.random() < Math.min(0.32, 0.05 + G.wave * 0.025);
+  const speed = (elite ? 55 : 40) + G.wave * 3 + Math.random() * 20;
+  G.pineapples.push({
+    x: 14 + Math.random() * (W - 28),
+    y: -12,
+    vy: speed,
+    r: elite ? 11 : 8,
+    elite,
+    wobble: Math.random() * Math.PI * 2,
+    wobbleSpeed: 1.5 + Math.random(),
+  });
+}
+
+function spawnPowerup() {
+  const types = ['bazooka', 'nuke', 'shield'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  G.powerups.push({
+    x: 20 + Math.random() * (W - 40),
+    y: -10,
+    vy: 34,
+    type,
+  });
+}
+
+function spawnBoss() {
+  const hp = 90 + G.bossDefeatCount * 45;
+  G.boss = {
+    x: W / 2, y: 40, w: 64, h: 64,
+    hp, maxHp: hp,
+    phase: 1,
+    vx: 26,
+    attackCd: 1.4,
+    hitFlash: 0,
+    intro: 1.2,
+  };
+  G.bossActive = true;
+  Audio_.sfx.bossAppear();
+}
+
+/* ---------------------------------------------------------
+   BOSS ATTACKS (8 patterns)
+--------------------------------------------------------- */
+const bossAttacks = [
+  // 1 straight single shot
+  (b) => shootBossProjectile(b.x, b.y + 20, 0, 70),
+  // 2 triple spread
+  (b) => {
+    for (const a of [-0.5, 0, 0.5]) shootBossProjectile(b.x, b.y + 20, Math.sin(a) * 60, 65 + Math.cos(a) * 10);
+  },
+  // 3 aimed at player
+  (b) => {
+    const dx = G.player.x - b.x, dy = GROUND_Y - b.y;
+    const len = Math.hypot(dx, dy) || 1;
+    shootBossProjectile(b.x, b.y + 20, (dx / len) * 90, (dy / len) * 90);
+  },
+  // 4 curtain wall with a gap
+  (b) => {
+    const gap = 18 + Math.random() * (W - 36);
+    for (let x = 6; x < W - 6; x += 14) {
+      if (Math.abs(x - gap) < 12) continue;
+      G.bossProjectiles.push({ x, y: b.y + 30, vx: 0, vy: 55, r: 4, telegraph: 0.35 });
+    }
+  },
+  // 5 fan burst (5-way)
+  (b) => {
+    for (let i = -2; i <= 2; i++) shootBossProjectile(b.x, b.y + 20, i * 26, 70);
+  },
+  // 6 dash toward player column then burst
+  (b) => {
+    b.dashTarget = clamp(G.player.x, 30, W - 30);
+    b.dashing = 0.4;
+  },
+  // 7 laser sweep warning column
+  (b) => {
+    const lx = clamp(G.player.x + (Math.random() * 30 - 15), 12, W - 12);
+    G.bossProjectiles.push({ x: lx, y: b.y + 10, vx: 0, vy: 0, r: 6, laser: true, telegraph: 0.55, life: 0.9 });
+  },
+  // 8 shockwave slam
+  (b) => {
+    shake(3.5, 0.4);
+    spawnParticles(b.x, b.y + b.h / 2, '#ff8844', 14, 90);
+    for (const a of [-1, -0.4, 0.4, 1]) shootBossProjectile(b.x, b.y + 20, a * 50, 60);
+  },
+];
+
+function shootBossProjectile(x, y, vx, vy) {
+  G.bossProjectiles.push({ x, y, vx, vy, r: 4.5, telegraph: 0 });
+}
+
+/* ---------------------------------------------------------
+   UPDATE
+--------------------------------------------------------- */
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+const input = { left: false, right: false, shoot: false, targetX: null };
+
+function update(dt) {
+  G.t += dt;
+
+  if (G.shakeTime > 0) { G.shakeTime -= dt; if (G.shakeTime <= 0) G.shakeMag = 0; }
+  if (G.flashAlpha > 0) G.flashAlpha = Math.max(0, G.flashAlpha - dt * 2.2);
+
+  updatePlayer(dt);
+  updatePineapples(dt);
+  updatePowerups(dt);
+  updateProjectiles(dt);
+  updateBossProjectiles(dt);
+  updateParticles(dt);
+
+  if (G.bossActive) updateBoss(dt);
+  else updateBossCountdown(dt);
+
+  if (!G.bossActive) updateWaveSpawning(dt);
+
+  if (G.lives <= 0) triggerGameOver();
+}
+
+function updatePlayer(dt) {
+  const p = G.player;
+  if (input.targetX !== null) {
+    p.x += clamp(input.targetX - p.x, -p.speed * dt * 1.6, p.speed * dt * 1.6);
+  } else {
+    if (input.left) p.x -= p.speed * dt;
+    if (input.right) p.x += p.speed * dt;
+  }
+  p.x = clamp(p.x, p.w / 2 + 2, W - p.w / 2 - 2);
+
+  if (p.shootCd > 0) p.shootCd -= dt;
+  if (input.shoot && p.shootCd <= 0) {
+    fireShot();
+    p.shootCd = p.bazooka ? 0.16 : 0.26;
+  }
+
+  if (p.shieldTime > 0) { p.shieldTime -= dt; if (p.shieldTime <= 0) p.shielded = false; }
+  if (p.bazookaTime > 0) { p.bazookaTime -= dt; if (p.bazookaTime <= 0) p.bazooka = false; }
+}
+
+function fireShot() {
+  const p = G.player;
+  G.projectiles.push({
+    x: p.x, y: p.y - p.h / 2,
+    vy: -190,
+    dmg: p.bazooka ? 5 : 1,
+    big: p.bazooka,
+  });
+  if (p.bazooka) Audio_.sfx.bigShot(); else Audio_.sfx.shot();
+}
+
+function updatePineapples(dt) {
+  const p = G.player;
+  for (let i = G.pineapples.length - 1; i >= 0; i--) {
+    const pa = G.pineapples[i];
+    pa.wobble += dt * pa.wobbleSpeed;
+    pa.x += Math.sin(pa.wobble) * (pa.elite ? 22 : 8) * dt;
+    pa.y += pa.vy * dt;
+    pa.x = clamp(pa.x, pa.r, W - pa.r);
+
+    // catch check
+    if (pa.y + pa.r >= p.y - p.h / 2 && pa.y - pa.r <= p.y + p.h / 2 &&
+        pa.x + pa.r >= p.x - p.w / 2 && pa.x - pa.r <= p.x + p.w / 2) {
+      catchPineapple(pa);
+      G.pineapples.splice(i, 1);
+      continue;
+    }
+
+    if (pa.y - pa.r > H) {
+      G.pineapples.splice(i, 1);
+      if (!p.shielded) loseLife();
+      Audio_.sfx.miss();
+    }
+  }
+}
+
+function catchPineapple(pa) {
+  const pts = pa.elite ? 25 : 10;
+  const coin = pa.elite ? 8 : 3;
+  G.score += pts;
+  G.money += coin;
+  spawnParticles(pa.x, pa.y, pa.elite ? '#c26bff' : '#ffe27a', pa.elite ? 10 : 5, pa.elite ? 60 : 35);
+  pa.elite ? Audio_.sfx.eliteCatch() : Audio_.sfx.catch();
+}
+
+function loseLife() {
+  G.lives -= 1;
+  shake(2, 0.2);
+}
+
+function updatePowerups(dt) {
+  const p = G.player;
+  for (let i = G.powerups.length - 1; i >= 0; i--) {
+    const pu = G.powerups[i];
+    pu.y += pu.vy * dt;
+    if (pu.y + 6 >= p.y - p.h / 2 && pu.y - 6 <= p.y + p.h / 2 &&
+        pu.x + 6 >= p.x - p.w / 2 && pu.x - 6 <= p.x + p.w / 2) {
+      applyPowerup(pu.type);
+      G.powerups.splice(i, 1);
+      continue;
+    }
+    if (pu.y - 6 > H) G.powerups.splice(i, 1);
+  }
+}
+
+function applyPowerup(type) {
+  Audio_.sfx.powerup();
+  const p = G.player;
+  if (type === 'bazooka') { p.bazooka = true; p.bazookaTime = 8; }
+  else if (type === 'shield') { p.shielded = true; p.shieldTime = 10; Audio_.sfx.shield(); }
+  else if (type === 'nuke') {
+    flash(0.85);
+    shake(5, 0.5);
+    Audio_.sfx.explosion();
+    for (const pa of G.pineapples) {
+      G.score += pa.elite ? 15 : 6;
+      G.money += pa.elite ? 5 : 2;
+      spawnParticles(pa.x, pa.y, '#ffaa33', 8, 70);
+    }
+    G.pineapples.length = 0;
+    G.bossProjectiles.length = 0;
+    if (G.bossActive && G.boss) damageBoss(30);
+  }
+}
+
+function updateProjectiles(dt) {
+  for (let i = G.projectiles.length - 1; i >= 0; i--) {
+    const pr = G.projectiles[i];
+    pr.y += pr.vy * dt;
+    if (G.bossActive && G.boss) {
+      const b = G.boss;
+      if (Math.abs(pr.x - b.x) < b.w / 2.4 && Math.abs(pr.y - b.y) < b.h / 2.4) {
+        damageBoss(pr.dmg);
+        spawnParticles(pr.x, pr.y, '#ffffff', pr.big ? 8 : 3, pr.big ? 60 : 25);
+        if (pr.big) shake(1.5, 0.15);
+        G.projectiles.splice(i, 1);
+        continue;
+      }
+    }
+    if (pr.y < -10) G.projectiles.splice(i, 1);
+  }
+}
+
+function damageBoss(dmg) {
+  const b = G.boss;
+  if (!b) return;
+  b.hp -= dmg;
+  b.hitFlash = 0.08;
+  Audio_.sfx.bossHit();
+  const ratio = b.hp / b.maxHp;
+  b.phase = ratio < 0.34 ? 3 : ratio < 0.67 ? 2 : 1;
+  if (b.hp <= 0) defeatBoss();
+}
+
+function defeatBoss() {
+  const b = G.boss;
+  flash(1);
+  shake(6, 0.6);
+  Audio_.sfx.bossDefeat();
+  spawnParticles(b.x, b.y, '#ffdd55', 40, 140);
+  G.score += 200 + G.bossDefeatCount * 60;
+  G.money += 80 + G.bossDefeatCount * 30;
+  G.bossDefeatCount += 1;
+  G.bossActive = false;
+  G.boss = null;
+  G.bossProjectiles.length = 0;
+  G.nextBossIn = 60;
+}
+
+function updateBossCountdown(dt) {
+  G.nextBossIn -= dt;
+  if (G.nextBossIn <= 0) spawnBoss();
+}
+
+function updateBoss(dt) {
+  const b = G.boss;
+  if (b.hitFlash > 0) b.hitFlash -= dt;
+
+  if (b.intro > 0) { b.intro -= dt; return; }
+
+  // movement
+  if (b.dashing !== undefined && b.dashing > 0) {
+    b.dashing -= dt;
+    b.x += clamp(b.dashTarget - b.x, -220 * dt, 220 * dt);
+    if (b.dashing <= 0) {
+      for (const a of [-0.6, 0, 0.6]) shootBossProjectile(b.x, b.y + 20, a * 70, 75);
+    }
+  } else {
+    b.x += b.vx * dt;
+    if (b.x < 26 || b.x > W - 26) b.vx *= -1;
+    b.x = clamp(b.x, 26, W - 26);
+  }
+
+  const cdMul = b.phase === 3 ? 0.55 : b.phase === 2 ? 0.75 : 1;
+  b.attackCd -= dt;
+  if (b.attackCd <= 0) {
+    const atk = bossAttacks[Math.floor(Math.random() * bossAttacks.length)];
+    atk(b);
+    b.attackCd = (0.9 + Math.random() * 0.9) * cdMul;
+    if (Math.random() < 0.15) Audio_.sfx.bossRoar();
+  }
+}
+
+function updateBossProjectiles(dt) {
+  const p = G.player;
+  for (let i = G.bossProjectiles.length - 1; i >= 0; i--) {
+    const bp = G.bossProjectiles[i];
+    if (bp.telegraph > 0) {
+      bp.telegraph -= dt;
+      if (bp.laser) { if (bp.telegraph <= 0) { bp.active = true; bp.life = 0.25; } continue; }
+      continue;
+    }
+    if (bp.laser) {
+      bp.life -= dt;
+      if (bp.active && Math.abs(p.x - bp.x) < p.w / 2 + 3) {
+        if (!p.shielded) loseLife(); else spawnParticles(p.x, p.y, '#66ccff', 6, 40);
+        Audio_.sfx.miss();
+        G.bossProjectiles.splice(i, 1);
+        continue;
+      }
+      if (bp.life <= 0) G.bossProjectiles.splice(i, 1);
+      continue;
+    }
+
+    bp.x += (bp.vx || 0) * dt;
+    bp.y += (bp.vy || 0) * dt;
+
+    if (bp.y + bp.r >= p.y - p.h / 2 && bp.y - bp.r <= p.y + p.h / 2 &&
+        bp.x + bp.r >= p.x - p.w / 2 && bp.x - bp.r <= p.x + p.w / 2) {
+      if (!p.shielded) { loseLife(); Audio_.sfx.miss(); }
+      else spawnParticles(p.x, p.y, '#66ccff', 6, 40);
+      G.bossProjectiles.splice(i, 1);
+      continue;
+    }
+    if (bp.y > H + 10 || bp.y < -20 || bp.x < -20 || bp.x > W + 20) G.bossProjectiles.splice(i, 1);
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = G.particles.length - 1; i >= 0; i--) {
+    const pt = G.particles[i];
+    pt.life -= dt;
+    if (pt.life <= 0) { G.particles.splice(i, 1); continue; }
+    pt.x += pt.vx * dt;
+    pt.y += pt.vy * dt;
+    pt.vy += 60 * dt;
+  }
+}
+
+function updateWaveSpawning(dt) {
+  G.waveTimer += dt;
+  if (G.waveTimer >= 16) {
+    G.waveTimer = 0;
+    G.wave += 1;
+  }
+
+  G.spawnTimer -= dt;
+  if (G.spawnTimer <= 0) {
+    spawnPineapple();
+    G.spawnTimer = clamp(0.85 - G.wave * 0.045, 0.28, 1.2);
+  }
+
+  G.powerupTimer -= dt;
+  if (G.powerupTimer <= 0) {
+    spawnPowerup();
+    G.powerupTimer = 9 + Math.random() * 6;
+  }
+}
+
+function triggerGameOver() {
+  if (G.state === 'gameover') return;
+  G.state = 'gameover';
+  Audio_.sfx.gameOver();
+  Audio_.stopMusic();
+  save.money += G.money;
+  if (G.score > save.highScore) save.highScore = G.score;
+  persistSave();
+  showGameOverScreen();
+}
+
+/* ---------------------------------------------------------
+   RENDER
+--------------------------------------------------------- */
+function render() {
+  ctx.save();
+  ctx.clearRect(0, 0, W, H);
+
+  // background
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#1a0a35');
+  grad.addColorStop(1, '#05010f');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  drawStars();
+
+  let ox = 0, oy = 0;
+  if (G.shakeMag > 0) {
+    ox = (Math.random() * 2 - 1) * G.shakeMag;
+    oy = (Math.random() * 2 - 1) * G.shakeMag;
+  }
+  ctx.translate(ox, oy);
+
+  if (G.state === 'playing' || G.state === 'paused') {
+    drawGround();
+    for (const pu of G.powerups) drawPowerup(pu);
+    for (const pa of G.pineapples) drawPineapple(pa.x, pa.y, pa.elite ? 2.4 : 1.8, pa.elite, false);
+    for (const bp of G.bossProjectiles) drawBossProjectile(bp);
+    for (const pr of G.projectiles) drawProjectile(pr);
+    if (G.bossActive && G.boss) drawBoss(G.boss);
+    drawPlayer();
+    for (const pt of G.particles) drawParticle(pt);
+  }
+
+  ctx.restore();
+
+  if (G.flashAlpha > 0) {
+    ctx.fillStyle = `rgba(255,255,255,${G.flashAlpha})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+
+function drawStars() {
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  for (let i = 0; i < 24; i++) {
+    const x = (i * 53.7) % W;
+    const y = (i * 91.3 + G.t * 4) % H;
+    ctx.fillRect(x, y, 1, 1);
+  }
+}
+
+function drawGround() {
+  ctx.fillStyle = '#150a2a';
+  ctx.fillRect(0, GROUND_Y + 9, W, H - GROUND_Y - 9);
+  ctx.fillStyle = '#2a1550';
+  ctx.fillRect(0, GROUND_Y + 9, W, 2);
+}
+
+function drawPlayer() {
+  const p = G.player;
+  if (p.shielded) {
+    ctx.save();
+    ctx.globalAlpha = 0.35 + 0.15 * Math.sin(G.t * 8);
+    ctx.strokeStyle = '#66ccff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y - 2, 24, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+  drawBasket(p.x, p.y, p.w, p.h, save.equipped, G.t);
+  if (p.bazooka) {
+    ctx.fillStyle = '#ff8844';
+    ctx.fillRect(p.x - 2, p.y - p.h / 2 - 6, 4, 6);
+  }
+}
+
+function drawPowerup(pu) {
+  const colors = { bazooka: '#ff8844', nuke: '#ff3355', shield: '#33ccff' };
+  const glyphs = { bazooka: 'B', nuke: 'N', shield: 'S' };
+  ctx.save();
+  ctx.translate(pu.x, pu.y);
+  ctx.rotate(Math.sin(G.t * 3 + pu.x) * 0.15);
+  ctx.fillStyle = colors[pu.type];
+  ctx.fillRect(-7, -7, 14, 14);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-7, -7, 14, 14);
+  ctx.fillStyle = '#fff';
+  ctx.font = '8px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(glyphs[pu.type], 0, 1);
+  ctx.restore();
+}
+
+function drawProjectile(pr) {
+  ctx.fillStyle = pr.big ? '#ff8844' : '#ffffaa';
+  const w = pr.big ? 5 : 2, h = pr.big ? 9 : 6;
+  ctx.fillRect(pr.x - w / 2, pr.y - h / 2, w, h);
+}
+
+function drawBossProjectile(bp) {
+  if (bp.laser) {
+    if (bp.telegraph > 0) {
+      ctx.fillStyle = 'rgba(255,60,60,0.35)';
+      ctx.fillRect(bp.x - 6, 0, 12, H);
+    } else if (bp.active) {
+      ctx.fillStyle = 'rgba(255,40,40,0.85)';
+      ctx.fillRect(bp.x - 5, 0, 10, H);
+    }
+    return;
+  }
+  if (bp.telegraph > 0) {
+    ctx.fillStyle = 'rgba(255,120,60,0.4)';
+    ctx.beginPath();
+    ctx.arc(bp.x, bp.y, bp.r + 2, 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  ctx.fillStyle = '#5a2a08';
+  ctx.beginPath();
+  ctx.arc(bp.x, bp.y, bp.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#ff8844';
+  ctx.beginPath();
+  ctx.arc(bp.x, bp.y, bp.r * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawParticle(pt) {
+  ctx.globalAlpha = clamp(pt.life / pt.maxLife, 0, 1);
+  ctx.fillStyle = pt.color;
+  ctx.fillRect(pt.x - pt.size / 2, pt.y - pt.size / 2, pt.size, pt.size);
+  ctx.globalAlpha = 1;
+}
+
+/* ---------------------------------------------------------
+   UI (HUD, screens)
+--------------------------------------------------------- */
+const el = (id) => document.getElementById(id);
+const hud = el('hud');
+const scoreVal = el('scoreVal'), moneyVal = el('moneyVal'), waveVal = el('waveVal'), livesVal = el('livesVal');
+const bossBarWrap = el('bossBarWrap'), bossBarFill = el('bossBarFill');
+const powerupStatus = el('powerupStatus');
+const nextBossTimer = el('nextBossTimer');
+
+function updateHUD() {
+  scoreVal.textContent = G.score;
+  moneyVal.textContent = G.money + save.money;
+  waveVal.textContent = G.wave;
+  livesVal.textContent = Math.max(0, G.lives);
+
+  if (G.bossActive && G.boss) {
+    bossBarWrap.classList.remove('hidden');
+    nextBossTimer.classList.add('hidden');
+    bossBarFill.style.width = `${clamp(G.boss.hp / G.boss.maxHp, 0, 1) * 100}%`;
+  } else {
+    bossBarWrap.classList.add('hidden');
+    nextBossTimer.classList.remove('hidden');
+    nextBossTimer.textContent = `👑 через: ${Math.ceil(G.nextBossIn)}с`;
+  }
+
+  const statuses = [];
+  const p = G.player;
+  if (p.shielded) statuses.push(`🛡 щит: ${p.shieldTime.toFixed(1)}с`);
+  if (p.bazooka) statuses.push(`🚀 базука: ${p.bazookaTime.toFixed(1)}с`);
+  powerupStatus.textContent = statuses.join('  ');
+}
+
+function showScreen(id) {
+  ['startScreen', 'gameOverScreen', 'shopScreen', 'caseOpenScreen'].forEach(s => el(s).classList.add('hidden'));
+  if (id) el(id).classList.remove('hidden');
+}
+
+function showGameOverScreen() {
+  el('finalScore').textContent = G.score;
+  el('finalMoney').textContent = G.money;
+  el('finalHigh').textContent = save.highScore;
+  showScreen('gameOverScreen');
+  el('pauseBtn').classList.add('hidden');
+  el('shopBtnIngame').classList.remove('hidden');
+}
+
+/* ---------------------------------------------------------
+   SHOP UI
+--------------------------------------------------------- */
+function renderShop() {
+  el('shopMoney').textContent = G.money + save.money;
+  renderCases();
+  renderInventory();
+}
+
+function renderCases() {
+  const grid = el('caseGrid');
+  grid.innerHTML = '';
+  for (const c of CASES) {
+    const card = document.createElement('div');
+    card.className = 'case-card';
+    const totalMoney = G.money + save.money;
+    card.innerHTML = `
+      <div class="case-icon">${c.icon}</div>
+      <div class="case-name">${c.name}</div>
+      <div>💰 ${c.cost}</div>
+      <button ${totalMoney < c.cost ? 'disabled' : ''}>Открыть</button>
+    `;
+    card.querySelector('button').addEventListener('click', () => buyCase(c));
+    grid.appendChild(card);
+  }
+}
+
+function renderInventory() {
+  const grid = el('invGrid');
+  grid.innerHTML = '';
+  for (const skinId of save.inventory) {
+    const skin = SKINS[skinId];
+    if (!skin) continue;
+    const card = document.createElement('div');
+    card.className = `inv-card rarity-${skin.rarity}`;
+    const equipped = save.equipped === skinId;
+    card.innerHTML = `
+      <div class="inv-icon">🧺</div>
+      <div>${skin.name}</div>
+      <div style="opacity:.7">${RARITY_LABEL[skin.rarity]}</div>
+      <button class="${equipped ? 'equipped' : ''}">${equipped ? '✓ Надето' : 'Надеть'}</button>
+    `;
+    card.querySelector('button').addEventListener('click', () => equipSkin(skinId));
+    grid.appendChild(card);
+  }
+}
+
+function buyCase(caseDef) {
+  const total = G.money + save.money;
+  if (total < caseDef.cost) return;
+  Audio_.sfx.click();
+  // spend from run money first, then bank
+  if (G.money >= caseDef.cost) G.money -= caseDef.cost;
+  else { save.money -= (caseDef.cost - G.money); G.money = 0; }
+
+  const skinId = rollCase(caseDef);
+  const alreadyOwned = save.inventory.includes(skinId);
+  let refund = 0;
+  if (alreadyOwned) {
+    refund = { common: 15, rare: 45, epic: 120, legendary: 300, rainbow: 600 }[SKINS[skinId].rarity] || 10;
+    save.money += refund;
+  } else {
+    save.inventory.push(skinId);
+  }
+  persistSave();
+  renderShop();
+  showCaseReveal(skinId, alreadyOwned, refund);
+}
+
+function showCaseReveal(skinId, dup, refund) {
+  const skin = SKINS[skinId];
+  Audio_.sfx.caseOpen();
+  const reveal = el('caseReveal');
+  reveal.innerHTML = `
+    <span class="reveal-icon">🧺</span>
+    <div class="rarity-${skin.rarity}" style="display:inline-block;padding:6px 10px;border:2px solid;border-radius:6px;">
+      ${RARITY_ICON[skin.rarity]} ${skin.name}<br>
+      <span style="font-size:7px;opacity:.8">${RARITY_LABEL[skin.rarity]}</span>
+    </div>
+    ${dup ? `<p class="pixel-text tiny" style="margin-top:10px">Уже есть! +💰${refund}</p>` : ''}
+  `;
+  showScreen('caseOpenScreen');
+  el('caseOpenCloseBtn').classList.remove('hidden');
+}
+
+function equipSkin(skinId) {
+  Audio_.sfx.click();
+  save.equipped = skinId;
+  persistSave();
+  renderInventory();
+}
+
+/* ---------------------------------------------------------
+   INPUT
+--------------------------------------------------------- */
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.left = true;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') input.right = true;
+  if (e.code === 'Space') { input.shoot = true; e.preventDefault(); }
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') input.left = false;
+  if (e.code === 'ArrowRight' || e.code === 'KeyD') input.right = false;
+  if (e.code === 'Space') input.shoot = false;
+});
+
+function canvasX(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  return ((clientX - rect.left) / rect.width) * W;
+}
+
+canvas.addEventListener('mousemove', (e) => { input.targetX = canvasX(e.clientX); });
+canvas.addEventListener('mouseleave', () => { input.targetX = null; });
+canvas.addEventListener('mousedown', () => { input.shoot = true; });
+window.addEventListener('mouseup', () => { input.shoot = false; });
+
+canvas.addEventListener('touchstart', (e) => {
+  input.targetX = canvasX(e.touches[0].clientX);
+  input.shoot = true;
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchmove', (e) => {
+  input.targetX = canvasX(e.touches[0].clientX);
+  e.preventDefault();
+}, { passive: false });
+canvas.addEventListener('touchend', () => { input.shoot = false; input.targetX = null; });
+
+/* ---------------------------------------------------------
+   BUTTONS / SCREEN FLOW
+--------------------------------------------------------- */
+function startGame() {
+  Audio_.ctxReady();
+  Audio_.sfx.click();
+  resetRun();
+  G.state = 'playing';
+  showScreen(null);
+  hud.classList.remove('hidden');
+  el('pauseBtn').classList.remove('hidden');
+  el('shopBtnIngame').classList.remove('hidden');
+  Audio_.startMusic();
+}
+
+function openShop() {
+  Audio_.sfx.click();
+  G.prevState = G.state;
+  if (G.state === 'playing') G.state = 'paused';
+  renderShop();
+  showScreen('shopScreen');
+}
+
+function closeShop() {
+  Audio_.sfx.click();
+  showScreen(G.prevState === 'gameover' ? 'gameOverScreen' : null);
+  if (G.prevState === 'playing') G.state = 'playing';
+  else if (G.prevState === 'menu') { G.state = 'menu'; showScreen('startScreen'); }
+  else if (G.prevState === 'gameover') G.state = 'gameover';
+}
+
+el('playBtn').addEventListener('click', startGame);
+el('retryBtn').addEventListener('click', startGame);
+el('shopBtnMenu').addEventListener('click', openShop);
+el('shopBtnGameOver').addEventListener('click', openShop);
+el('shopBtnIngame').addEventListener('click', openShop);
+el('closeShopBtn').addEventListener('click', closeShop);
+el('caseOpenCloseBtn').addEventListener('click', () => {
+  Audio_.sfx.click();
+  showScreen('shopScreen');
+});
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    Audio_.sfx.click();
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    el('casesTab').classList.toggle('hidden', tab !== 'cases');
+    el('inventoryTab').classList.toggle('hidden', tab !== 'inventory');
+  });
+});
+
+el('muteBtn').addEventListener('click', () => {
+  const m = !Audio_.isMuted();
+  Audio_.setMuted(m);
+  el('muteBtn').textContent = m ? '🔇' : '🔊';
+});
+
+el('pauseBtn').addEventListener('click', () => {
+  if (G.state === 'playing') { G.state = 'paused'; el('pauseBtn').textContent = '▶'; Audio_.stopMusic(); }
+  else if (G.state === 'paused') { G.state = 'playing'; el('pauseBtn').textContent = '⏸'; Audio_.startMusic(); }
+});
+
+/* ---------------------------------------------------------
+   MAIN LOOP
+--------------------------------------------------------- */
+let lastT = performance.now();
+function loop(now) {
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  dt = Math.min(dt, 0.05);
+
+  if (G.state === 'playing') update(dt);
+  render();
+  updateHUD();
+
+  requestAnimationFrame(loop);
+}
+
+/* ---------------------------------------------------------
+   INIT
+--------------------------------------------------------- */
+(async function init() {
+  await loadSave();
+  showScreen('startScreen');
+  requestAnimationFrame(loop);
+})();
+
+})();
